@@ -1,0 +1,15 @@
+schema_version = "1.0.0"
+
+id = "om3d_asset_prep"
+version = "0.6.5"
+name = "OM3D Asset Prep"
+tagline = "Check, fix, pair and export game assets the same way every time"
+maintainer = "Aunmar <info@onmars3d.com>"
+type = "add-on"
+tags = ["Import-Export", "Object", "Mesh"]
+
+blender_version_min = "4.2.0"
+license = ["SPDX:GPL-3.0-or-later"]
+
+[permissions]
+files = "Write FBX exports and an export log to the folder you choose"
