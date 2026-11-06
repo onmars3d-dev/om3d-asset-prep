@@ -254,6 +254,36 @@ def uv_flipped(bm, eps=1e-12):
                       if _signed_area_2d([tuple(l[uv].uv) for l in f.loops]) < -eps]}
 
 
+def _uv_split(e, uv):
+    """True when the UVs on the two sides of an edge don't meet (a UV seam)."""
+    a, b = e.link_loops[0], e.link_loops[1]
+    # a runs a.vert -> next; b runs the other way unless the winding is inconsistent
+    if a.vert == b.vert:
+        pairs = ((a, b), (a.link_loop_next, b.link_loop_next))
+    else:
+        pairs = ((a, b.link_loop_next), (a.link_loop_next, b))
+    return any((x[uv].uv - y[uv].uv).length > 1e-5 for x, y in pairs)
+
+
+def hard_edges_without_uv_seam(bm, hard=None):
+    """Hard (split-normal) edges where the UVs aren't split. A normal map bake needs a UV
+    seam on every hard edge, or the hard edge shows up as a visible line.
+    hard: edge indices that are hard (from custom split normals). Without it, an edge is
+    hard when it's marked sharp or either face is flat shaded."""
+    uv = bm.loops.layers.uv.active
+    if uv is None:
+        return {}
+    if hard is not None and len(hard) and max(hard) >= len(bm.edges):
+        hard = None  # stale (topology changed since the normals were read)
+    if hard is not None:
+        bm.edges.ensure_lookup_table()
+        edges = [bm.edges[i] for i in hard]
+    else:
+        edges = [e for e in bm.edges if len(e.link_faces) == 2 and
+                 (not e.smooth or not e.link_faces[0].smooth or not e.link_faces[1].smooth)]
+    return {"edges": [e for e in edges if len(e.link_loops) == 2 and not _uv_split(e, uv)]}
+
+
 def uv_overlap(bm, eps=1e-7):
     """Faces whose UVs overlap other UV faces with the same material on the active UV map.
     Each material is its own texture set, so overlaps across materials don't count."""

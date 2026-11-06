@@ -34,7 +34,7 @@ What it checks:
 
 - **Transforms:** negative scale, non-uniform scale, unapplied rotation and scale
 - **Mesh:** n-gons, non-manifold geometry, flipped normals, collapsed faces, overlapping faces, overlapping verts, T-verts, loose verts and edges
-- **UVs:** missing UV map, more than one UV map, overlapping UVs (counted per material), flipped (mirrored) UVs
+- **UVs:** missing UV map, more than one UV map, overlapping UVs (counted per material), flipped (mirrored) UVs, hard edges without a UV seam
 - **Names:** names off the convention, import junk names like `pCube3` or `polySurface12`, `.001` duplicates, mesh data names that don't match
 - **Hierarchy and materials:** group empties, empty material slots, unused materials
 

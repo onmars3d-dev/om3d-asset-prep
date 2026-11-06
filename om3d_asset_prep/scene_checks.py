@@ -44,6 +44,7 @@ BUILTIN = (
     ("overlapping_verts", "Overlapping verts", "WARNING", "ELEMENT"),
     ("tverts", "T-verts", "WARNING", "ELEMENT"),
     ("uv_overlap", "Overlapping UVs", "WARNING", "ELEMENT"),
+    ("hard_no_seam", "Hard edges, no UV seam", "WARNING", "ELEMENT"),
     ("name_junk", "Import junk names", "WARNING", "OBJECT"),
     ("name_convention", "Names off convention", "WARNING", "OBJECT"),
     ("name_duplicate", "Duplicate suffix (.001)", "WARNING", "OBJECT"),
@@ -56,6 +57,9 @@ BUILTIN = (
 )
 
 HELP = {
+    "hard_no_seam": "Hard edges (split normals) where the UVs aren't split. Every hard edge "
+                    "needs a UV seam, or the normal map bake shows a line along it. Select "
+                    "the edges, mark them as seams and unwrap again.",
     "scale_negative": "Mirrored with negative scale. Normals flip when it's applied and exports "
                       "can come out inside out. Apply scale, then recalculate normals.",
     "uv_missing": "No UV map, so it can't be textured or baked.",
@@ -125,6 +129,7 @@ ELEMENT_CHECKS = {
     "tverts": lambda bm, opt: mesh_checks.tverts(bm, opt.overlap_tolerance),
     "uv_overlap": lambda bm, opt: mesh_checks.uv_overlap(bm),
     "uv_flipped": lambda bm, opt: mesh_checks.uv_flipped(bm),
+    "hard_no_seam": lambda bm, opt: mesh_checks.hard_edges_without_uv_seam(bm, opt.hard_edges),
     "open_edges": lambda bm, opt: mesh_checks.open_edges(bm),
 }
 
@@ -164,6 +169,7 @@ class Options:
     overlap_tolerance: float = 1e-4
     enabled: frozenset = None  # None = every check
     skip_heavy_over: int = 0   # 0 = never skip heavy checks
+    hard_edges: object = None  # per mesh: indices of hard edges (from split normals)
 
     def on(self, key):
         return self.enabled is None or key in self.enabled
@@ -196,6 +202,62 @@ def gather_objects(context, scope):
 def topo_draw_running():
     wm = bpy.context.window_manager
     return bool(getattr(wm, "om3d_topo_running", False))
+
+
+HARD_DOT = 0.999  # corner normals closer than ~2.5 degrees count as one smooth normal
+
+
+def hard_edge_indices(me):
+    """Indices of edges where the shading splits, read from the mesh's corner normals
+    (covers sharp marks, flat faces, smooth-by-angle and imported custom normals)."""
+    import numpy as np
+    nl = len(me.loops)
+    if nl == 0:
+        return frozenset()
+    try:
+        cn = me.corner_normals  # Blender 4.1+
+        normals = np.empty(nl * 3, dtype=np.float32)
+        cn.foreach_get("vector", normals)
+    except AttributeError:
+        me.calc_normals_split()
+        normals = np.empty(nl * 3, dtype=np.float32)
+        me.loops.foreach_get("normal", normals)
+    normals = normals.reshape(nl, 3)
+    verts = np.empty(nl, dtype=np.int64)
+    edges = np.empty(nl, dtype=np.int64)
+    me.loops.foreach_get("vertex_index", verts)
+    me.loops.foreach_get("edge_index", edges)
+    starts = np.empty(len(me.polygons), dtype=np.int64)
+    totals = np.empty(len(me.polygons), dtype=np.int64)
+    me.polygons.foreach_get("loop_start", starts)
+    me.polygons.foreach_get("loop_total", totals)
+    nxt = np.arange(nl) + 1
+    ends = starts + totals
+    nxt[ends - 1] = starts  # wrap to each face's first loop
+    order = np.argsort(edges, kind="stable")
+    e_sorted = edges[order]
+    uniq, first, count = np.unique(e_sorted, return_index=True, return_counts=True)
+    two = count == 2
+    r1 = order[first[two]]
+    r2 = order[first[two] + 1]
+    same = verts[r1] == verts[r2]  # inconsistent winding: both loops start at the same vert
+    a1, b1 = normals[r1], normals[nxt[r1]]
+    a2 = np.where(same[:, None], normals[r2], normals[nxt[r2]])
+    b2 = np.where(same[:, None], normals[nxt[r2]], normals[r2])
+    d = np.minimum((a1 * a2).sum(1), (b1 * b2).sum(1))
+    return frozenset(int(i) for i in uniq[two][d < HARD_DOT])
+
+
+def mesh_options(obj, opt):
+    """Options for one object's mesh: adds its hard edges when that check is on.
+    In Edit Mode the mesh data can be stale, so the check falls back to sharp/flat flags."""
+    if not opt.on("hard_no_seam") or obj.type != "MESH" or obj.mode == "EDIT":
+        return opt
+    try:
+        return replace(opt, hard_edges=hard_edge_indices(obj.data))
+    except Exception as exc:  # never break a check over this
+        print("OM3D Asset Prep: hard edge read failed on", obj.name, exc)
+        return opt
 
 
 def read_bmesh(obj):
@@ -370,7 +432,8 @@ def check_objects(objects, opt=None, geometry_out=None):
         if me.name not in mesh_cache:
             bm, owned = read_bmesh(obj)
             try:
-                mesh_cache[me.name] = check_mesh(bm, opt, geometry_out is not None)
+                mesh_cache[me.name] = check_mesh(bm, mesh_options(obj, opt),
+                                                 geometry_out is not None)
             finally:
                 if owned:
                     bm.free()

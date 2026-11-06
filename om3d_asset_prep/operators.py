@@ -192,6 +192,7 @@ class OM3D_OT_scene_prep_select_elements(bpy.types.Operator):
         for o in objs:
             o.select_set(True)
         context.view_layer.objects.active = objs[0]
+        per_obj = {o.name: scene_checks.mesh_options(o, opt) for o in objs}  # before Edit Mode
         bpy.ops.object.mode_set(mode="EDIT")
 
         # Work out which select mode fits before touching the selection.
@@ -203,7 +204,7 @@ class OM3D_OT_scene_prep_select_elements(bpy.types.Operator):
                 continue
             seen_meshes.add(o.data.name)
             bm = bmesh.from_edit_mesh(o.data)  # one wrapper per mesh, held below
-            found = scene_checks.element_findings(bm, self.key, opt)
+            found = scene_checks.element_findings(bm, self.key, per_obj.get(o.name, opt))
             kinds |= {k for k, v in found.items() if v}
             found_by_obj.append((o, bm, found))
         ts = context.tool_settings

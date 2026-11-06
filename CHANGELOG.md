@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.7.0
+- New check: Hard edges, no UV seam. Finds edges where the shading splits (sharp marks, flat faces, smooth by angle or imported custom normals) but the UVs don't, since every hard edge needs a UV seam for a clean normal map bake.
+
 ## 0.6.5
 - Overlapping faces only counts faces that face the same way (z-fighting) or a face folded back over its neighbour. Separate parts touching back to back, and overlaps under 1% of a face, no longer count.
 
