@@ -279,6 +279,7 @@ def fix_options(context):
         dissolve_degenerate=st.fix_degenerate, triangulate_ngons=st.fix_triangulate,
         strip_duplicates=st.fix_strip_dup, match_data_names=st.fix_data_names,
         tolerance=p.overlap_tolerance if p else 1e-4,
+        zero_area=p.zero_area_threshold if p else 1e-10,
         convention=p.convention() if p else None,
     )
 

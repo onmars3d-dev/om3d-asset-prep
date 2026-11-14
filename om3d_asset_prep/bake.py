@@ -169,40 +169,47 @@ def mesh_checks_bmesh(obj):
 # Explode / reset
 # --------------------------------------------------------------------------
 
-def _movers(objects):
-    """Objects to move, skipping any whose parent is also moving (it follows the parent)."""
-    s = set(objects)
-    out = []
-    for o in objects:
-        p = o.parent
-        skip = False
-        while p is not None:
-            if p in s:
-                skip = True
-                break
-            p = p.parent
-        if not skip:
-            out.append(o)
-    return out
+def _depth(obj):
+    d, p = 0, obj.parent
+    while p is not None:
+        d += 1
+        p = p.parent
+    return d
 
 
-def _shift(obj, delta):
-    mw = obj.matrix_world.copy()
-    mw.translation += delta
-    obj.matrix_world = mw
-    old = Vector(obj.get(EXPLODE_PROP, (0.0, 0.0, 0.0)))
-    new = old + delta
-    if new.length < 1e-9:
-        if EXPLODE_PROP in obj:
-            del obj[EXPLODE_PROP]
-    else:
-        obj[EXPLODE_PROP] = tuple(new)
+def _apply_world(targets):
+    """Give each object its target world matrix. Parents go first, with a scene update
+    after each level, so a child is placed against where its parent really ended up."""
+    levels = {}
+    for o, mw in targets.items():
+        levels.setdefault(_depth(o), []).append((o, mw))
+    for d in sorted(levels):
+        for o, mw in levels[d]:
+            o.matrix_world = mw
+        bpy.context.view_layer.update()
+
+
+def _follows(obj, moving):
+    """True when one of obj's parents is in the moving set."""
+    p = obj.parent
+    while p is not None:
+        if p in moving:
+            return True
+        p = p.parent
+    return False
+
+
+def _offset(obj):
+    return Vector(obj.get(EXPLODE_PROP, (0.0, 0.0, 0.0)))
 
 
 def explode(pairs, axis="X", gap=None):
     """Line pairs up along an axis, each pair's box clear of the last.
-    Returns the number of pairs moved. Run Reset first to start from the original layout."""
+    Returns the number of pairs moved. Run Reset first to start from the original layout.
+    Every moved object records its own world offset, so Reset is exact even when an
+    object is parented to an object from another pair."""
     i = AXES[axis]
+    bpy.context.view_layer.update()  # fresh world matrices before reading them
     boxes = []
     for p in pairs:
         objs = p.lows + p.highs
@@ -216,32 +223,57 @@ def explode(pairs, axis="X", gap=None):
         gap = biggest * 0.25
     cursor = boxes[0][2][0][i]
     moved = 0
+    targets = {}
+    offsets = {}
     for p, objs, (b0, b1) in boxes:
         delta = Vector((0.0, 0.0, 0.0))
         delta[i] = cursor - b0[i]
         if abs(delta[i]) > 1e-9:
-            for o in _movers(objs):
-                _shift(o, delta)
+            for o in objs:
+                if o in targets:
+                    continue
+                mw = o.matrix_world.copy()
+                mw.translation += delta
+                targets[o] = mw
+                offsets[o] = _offset(o) + delta
             moved += 1
         cursor += (b1[i] - b0[i]) + gap
+    # objects that stay put but hang under one that moves must be pinned in place
+    pinned = {}
+    for p, objs, _b in boxes:
+        for o in objs:
+            if o not in targets and _follows(o, targets):
+                pinned[o] = o.matrix_world.copy()
+    _apply_world({**pinned, **targets})
+    for o in pinned:
+        # a zero offset marks "held in place during Explode", so Reset holds it again
+        if EXPLODE_PROP not in o:
+            o[EXPLODE_PROP] = (0.0, 0.0, 0.0)
+    for o, off in offsets.items():
+        if off.length < 1e-9 and not _follows(o, targets):
+            if EXPLODE_PROP in o:
+                del o[EXPLODE_PROP]
+        else:
+            o[EXPLODE_PROP] = tuple(off)
     return moved
 
 
 def reset_explode(objects):
     """Undo Explode on these objects. Returns how many moved back."""
-    n = 0
-    for o in _movers([o for o in objects if EXPLODE_PROP in o]):
-        mw = o.matrix_world.copy()
-        mw.translation -= Vector(o[EXPLODE_PROP])
-        o.matrix_world = mw
-        del o[EXPLODE_PROP]
-        n += 1
-    # children of moved parents carry a stale offset of their own only if they
-    # were moved separately; clear any leftovers so Reset is idempotent
+    bpy.context.view_layer.update()
+    targets = {}
     for o in objects:
         if EXPLODE_PROP in o:
-            del o[EXPLODE_PROP]
-    return n
+            mw = o.matrix_world.copy()
+            mw.translation -= _offset(o)
+            targets[o] = mw
+    if not targets:
+        return 0
+    moved = sum(1 for o in targets if _offset(o).length > 1e-9)
+    _apply_world(targets)
+    for o in targets:
+        del o[EXPLODE_PROP]
+    return moved
 
 
 def exploded(objects):
@@ -306,12 +338,19 @@ def _camel(words):
     return "".join(w[:1].upper() + w[1:] for w in words)
 
 
-def part_from_name(name):
+def part_from_name(name, prefix="", asset=""):
     """Meaningful part name from an old object name, or '' when it's junk
-    ('Cylinder.015' -> '', 'Scale_Viewfinder.014' -> 'ScaleViewfinder')."""
+    ('Cylinder.015' -> '', 'Scale_Viewfinder.014' -> 'ScaleViewfinder').
+    A leading convention prefix and asset word are dropped, so 'SM_Crate_Lid'
+    with asset Crate gives 'Lid', not 'SMCrateLid'."""
     if naming.is_junk_name(name):
         return ""
-    words = [w for w in _words(name) if not _ROLE.match(w) and not _NUM.match(w)]
+    base = naming.strip_dup_suffix(name)
+    if prefix and base.lower().startswith(prefix.lower()):
+        base = base[len(prefix):]
+    words = [w for w in _words(base) if not _ROLE.match(w) and not _NUM.match(w)]
+    if asset and len(words) > 1 and words[0].lower() == asset.lower():
+        words = words[1:]
     return _camel(words)
 
 
@@ -476,7 +515,8 @@ def plan_names(lows, highs, conv, asset, keep_names=True):
         part = ""
         if keep_names:
             info = conv.parse(naming.strip_dup_suffix(lo.name))
-            part = (info["part"] or info["asset"]) if info else part_from_name(lo.name)
+            part = ((info["part"] or info["asset"]) if info
+                    else part_from_name(lo.name, conv.prefix or "", asset))
         if not part:
             counter[0] += 1
             part = f"Part{counter[0]:02d}"

@@ -11,6 +11,7 @@ from . import export_ops
 from . import scene_checks
 
 SEP = "\n"
+FS = "\x1f"  # field separator inside a line; object names can contain "|"
 
 
 def _conv(context):
@@ -188,12 +189,12 @@ def _name_plan(context):
 def _plan_lines(plan):
     lines = []
     for e in plan.entries:
-        lines.append(f"L|{e.low.name}|{e.new_low}|{len(e.highs)}")
+        lines.append(FS.join(("L", e.low.name, e.new_low, str(len(e.highs)))))
         for m, n in e.highs:
             note = m.runner_up.name if (m.close_call and m.runner_up) else ""
-            lines.append(f"H|{m.high.name}|{n}|{note}")
+            lines.append(FS.join(("H", m.high.name, n, note)))
     for m in plan.unmatched:
-        lines.append(f"U|{m.high.name}|{m.reason}")
+        lines.append(FS.join(("U", m.high.name, m.reason)))
     return lines
 
 
@@ -510,18 +511,19 @@ def draw_naming(layout, state):
     if not lines:
         return
     renamed = state.name_time.startswith("Renamed")
-    low_n = sum(1 for l in lines if l.startswith("L|"))
-    high_n = sum(1 for l in lines if l.startswith("H|"))
-    un = [l for l in lines if l.startswith("U|")]
-    close = [l for l in lines if l.startswith("H|") and l.split("|")[3]]
+    rows = [l.split(FS) for l in lines]
+    rows = [r for r in rows if (len(r) == 4 and r[0] in ("L", "H")) or (len(r) == 3 and r[0] == "U")]
+    low_n = sum(1 for r in rows if r[0] == "L")
+    high_n = sum(1 for r in rows if r[0] == "H")
+    un = [r for r in rows if r[0] == "U"]
+    close = [r for r in rows if r[0] == "H" and r[3]]
     box.label(text=state.name_time, icon="INFO")
     box.label(text=f"{low_n} lows, {high_n} highs, {len(un)} unmatched")
     if close:
         box.label(text=f"{len(close)} match{'es' if len(close) > 1 else ''} worth a look "
                        f"(still renamed)", icon="QUESTION")
     col = box.column(align=True)
-    for line in lines:
-        bits = line.split("|")
+    for bits in rows:
         if bits[0] == "L":
             col.separator()
             r = col.row(align=True)
@@ -544,8 +546,7 @@ def draw_naming(layout, state):
     if un:
         col.separator()
         col.label(text="Highs with no low nearby (left as they are)", icon="UNLINKED")
-        for line in un:
-            _o, name, why = line.split("|")
+        for _o, name, why in un:
             r = col.row(align=True)
             r.label(text=f"   {name}: {why}")
             op = r.operator("om3d.bake_select", text="", icon="RESTRICT_SELECT_OFF", emboss=False)

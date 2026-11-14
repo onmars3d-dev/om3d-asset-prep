@@ -16,7 +16,6 @@ DELAY = 0.35
 
 _dirty = set()
 _last_change = [0.0]
-_scheduled = [False]
 
 
 def _watched():
@@ -46,8 +45,8 @@ def _on_depsgraph(scene, depsgraph):
                     hit = True
     if hit:
         _last_change[0] = time.monotonic()
-        if not _scheduled[0]:
-            _scheduled[0] = True
+        # ask Blender, not a flag: a file load drops pending timers without telling us
+        if not bpy.app.timers.is_registered(_refresh):
             bpy.app.timers.register(_refresh, first_interval=DELAY)
 
 
@@ -55,7 +54,6 @@ def _refresh():
     wait = DELAY - (time.monotonic() - _last_change[0])
     if wait > 0.02:
         return wait  # still editing, wait for a pause
-    _scheduled[0] = False
     if scene_checks.topo_draw_running():
         _dirty.clear()
         return None
@@ -97,5 +95,4 @@ def unregister():
         bpy.app.handlers.depsgraph_update_post.remove(_on_depsgraph)
     if bpy.app.timers.is_registered(_refresh):
         bpy.app.timers.unregister(_refresh)
-    _scheduled[0] = False
     _dirty.clear()

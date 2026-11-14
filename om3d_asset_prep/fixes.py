@@ -8,8 +8,8 @@ code here. The operator wraps it in one undo step.
 Order: hierarchy, mesh cleanup, transforms, origins, materials, names.
 World positions never move: every parent change restores its children's
 world matrices, and origin changes move the mesh the opposite way.
-Linked (library) data and meshes shared by several objects are skipped where
-changing them would affect other objects.
+Linked (library) data, library overrides and meshes shared by several objects
+are skipped and listed, so nothing outside the chosen objects changes.
 """
 import re
 from dataclasses import dataclass, fields
@@ -49,6 +49,7 @@ class FixOptions:
     strip_duplicates: bool = True
     match_data_names: bool = True
     tolerance: float = 1e-4
+    zero_area: float = 1e-10      # same threshold the Collapsed faces check uses
     convention: naming.Convention = None
     dissolve_degenerate: bool = False
     triangulate_ngons: bool = False
@@ -107,7 +108,34 @@ class Report:
 # --------------------------------------------------------------------------
 
 def _linked(obj):
-    return obj.library is not None or (obj.data is not None and getattr(obj.data, "library", None))
+    """Linked from a library, or a library override (edits to those don't survive a reload)."""
+    data = obj.data
+    return bool(obj.library is not None or obj.override_library is not None
+                or (data is not None and (getattr(data, "library", None) is not None
+                                          or getattr(data, "override_library", None) is not None)))
+
+
+def _other_users(me):
+    """How many other objects share this mesh (a fake user doesn't count)."""
+    return me.users - (1 if me.use_fake_user else 0) - 1
+
+
+def _referenced_objects():
+    """Objects some modifier or constraint points at (mirror objects, array offsets,
+    constraint targets...). Removing one of those would change other objects."""
+    out = set()
+    for o in bpy.data.objects:
+        for owner in list(o.modifiers) + list(o.constraints):
+            for p in owner.bl_rna.properties:
+                if p.type == "POINTER" and p.identifier != "rna_type":
+                    v = getattr(owner, p.identifier, None)
+                    if isinstance(v, bpy.types.Object):
+                        out.add(v)
+            for t in getattr(owner, "targets", ()):  # Armature constraint and friends
+                v = getattr(t, "target", None)
+                if isinstance(v, bpy.types.Object):
+                    out.add(v)
+    return out
 
 
 def _alive(obj):
@@ -147,8 +175,9 @@ def _single_user_mesh(obj, rep, step):
     if _linked(obj):
         rep.skip(step, f"{obj.name} (linked from a library)")
         return False
-    if obj.data.users > 1:
-        rep.skip(step, f"{obj.name} (mesh shared with {obj.data.users - 1} other object(s))")
+    others = _other_users(obj.data)
+    if others > 0:
+        rep.skip(step, f"{obj.name} (mesh shared with {others} other object(s))")
         return False
     return True
 
@@ -173,9 +202,20 @@ def _fix_hierarchy(objects, opt, rep):
     if opt.remove_empty_parents:
         empties = {o for o in objects if o.type == "EMPTY" and o.children}
         empties |= {o.parent for o in objects if o.parent is not None and o.parent.type == "EMPTY"}
+        scope = set(objects)
+        referenced = _referenced_objects() if empties else set()
         for e in sorted(empties, key=_depth, reverse=True):
             if _linked(e):
                 rep.skip("hierarchy", f"{e.name} (linked from a library)")
+                continue
+            if e not in scope and any(c not in scope for c in e.children):
+                rep.skip("hierarchy", f"{e.name} (has children outside the scope)")
+                continue
+            if e in referenced:
+                rep.skip("hierarchy", f"{e.name} (used by a modifier or constraint)")
+                continue
+            if e.animation_data and e.animation_data.drivers:
+                rep.skip("hierarchy", f"{e.name} (has drivers)")
                 continue
             if e.instance_type == "COLLECTION":
                 rep.skip("hierarchy", f"{e.name} (collection instance)")
@@ -204,23 +244,27 @@ def _fix_mesh(meshes, opt, rep):
     if not (opt.merge_by_distance or opt.delete_loose or opt.recalc_normals
             or opt.dissolve_degenerate or opt.triangulate_ngons):
         return
-    done = set()
+    done = set()  # mesh datablocks already handled (instances share one)
     for obj in meshes:
         me = obj.data
-        if me.name in done or _linked(obj):
+        if me in done:
             continue
-        done.add(me.name)
+        done.add(me)
+        # Shared and linked meshes are only inspected: the work runs on a copy and is
+        # thrown away, so they are listed as skipped only when there was something to fix.
+        linked = _linked(obj)
+        others = _other_users(me)
         notes = []
 
         def work(bm):
             changed = False
             tol = mesh_checks.scaled_tolerance(bm, opt.tolerance)
             if opt.dissolve_degenerate:
-                bad = [f for f in bm.faces if f.calc_area() <= 1e-10]
+                bad = [f for f in bm.faces if f.calc_area() <= opt.zero_area]
                 if bad:
                     edges = list({e for f in bad for e in f.edges})
                     bmesh.ops.dissolve_degenerate(bm, dist=tol, edges=edges)
-                    left = [f for f in bm.faces if f.calc_area() <= 1e-10]
+                    left = [f for f in bm.faces if f.calc_area() <= opt.zero_area]
                     if left:
                         bmesh.ops.delete(bm, geom=left, context="FACES_ONLY")
                     notes.append(f"removed {len(bad)} collapsed faces")
@@ -265,10 +309,16 @@ def _fix_mesh(meshes, opt, rep):
                         changed = True
             return changed and not rep.dry_run
 
+        if linked or others > 0:
+            _edit_bmesh(me, lambda bm: work(bm) and False)
+            if notes and linked:
+                rep.skip("mesh", f"{obj.name} (linked from a library)")
+            elif notes:
+                rep.skip("mesh", f"{obj.name} (mesh shared with {others} other object(s))")
+            continue
         _edit_bmesh(me, work)
         if notes:
-            users = f" (shared by {me.users} objects)" if me.users > 1 else ""
-            rep.change("mesh", f"{obj.name}: " + ", ".join(notes) + users)
+            rep.change("mesh", f"{obj.name}: " + ", ".join(notes))
 
 
 def _fix_transforms(meshes, opt, rep):
@@ -284,6 +334,10 @@ def _fix_transforms(meshes, opt, rep):
         if not (has_rot or has_scale or has_loc):
             continue
         if not _single_user_mesh(obj, rep, "transforms"):
+            continue
+        if (has_scale or has_rot) and any(m.type == "MULTIRES" for m in obj.modifiers):
+            # Mesh.transform doesn't rescale Multires displacement; Blender's own Apply does
+            rep.skip("transforms", f"{obj.name} (has a Multires modifier; use Object > Apply instead)")
             continue
         negative = basis.to_3x3().determinant() < 0
         if negative and not opt.negative_scale:
@@ -345,11 +399,14 @@ def _fix_materials(meshes, opt, rep):
         done = set()
         for obj in meshes:
             me = obj.data
-            if me.name in done or _linked(obj):
+            if me in done or _linked(obj):
                 continue
-            done.add(me.name)
+            done.add(me)
             empty = [i for i, s in enumerate(obj.material_slots) if s.material is None]
             if not empty:
+                continue
+            if _other_users(me) > 0:
+                rep.skip("materials", f"{obj.name} (mesh shared with {_other_users(me)} other object(s))")
                 continue
             used = {p.material_index for p in me.polygons}
             removed = 0
@@ -385,6 +442,19 @@ def _token(text):
     return "".join(w[:1].upper() + w[1:] for w in words)
 
 
+def _part_token(base, conv, asset):
+    """<Part> from an old name, without repeating the convention prefix or the asset:
+    'SM_Crate_Lid' with asset Crate -> 'Lid' (not 'SMCrateLid')."""
+    text = base
+    prefix = conv.prefix or ""
+    if prefix and text.lower().startswith(prefix.lower()):
+        text = text[len(prefix):]
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", text) if w and not _ROLE_WORDS.match(w)]
+    if len(words) > 1 and words[0].lower() == asset.lower():
+        words = words[1:]
+    return "".join(w[:1].upper() + w[1:] for w in words)
+
+
 def _asset_for(obj, opt):
     if opt.asset_name:
         return _token(opt.asset_name) or "Asset"
@@ -414,7 +484,7 @@ def _fix_names(objects, opt, rep):
             asset = _asset_for(obj, opt)
             role = "high" if _HIGH_WORDS.search(base) else "low"
             junk = naming.is_junk_name(base)
-            part = "" if junk else _token(base)
+            part = "" if junk else _part_token(base, conv, asset)
             if part.lower() == asset.lower():
                 part = ""
             if not part:
@@ -444,7 +514,7 @@ def _fix_names(objects, opt, rep):
         for obj in meshes:
             name = planned.get(obj.name, obj.name) if rep.dry_run else obj.name
             me = obj.data
-            if me.users != 1 or me.name == name:
+            if _other_users(me) != 0 or me.name == name:
                 continue
             other = bpy.data.meshes.get(name)
             if other is not None and other != me:

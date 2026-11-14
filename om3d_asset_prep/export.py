@@ -129,6 +129,12 @@ def strip_low(conv, name):
     return name[:-len(tail)] if name.endswith(tail) else name
 
 
+def _safe_name(name):
+    """A collection name made safe to use as a folder name ('Props/Old' -> 'Props_Old')."""
+    out = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip(" .")
+    return out or "Asset"
+
+
 def plan(context, objects, conv, s, scene_report=None):
     """Work out every file to write. Nothing is touched."""
     p = Plan()
@@ -180,7 +186,7 @@ def plan(context, objects, conv, s, scene_report=None):
                                 if g["high"] else "Nothing to export")
             p.assets.append(job)
             continue
-        folder = os.path.join(s.root, asset)
+        folder = os.path.join(s.root, _safe_name(asset))
         stem = conv.prefix + asset
         lod_levels = sorted({lod for _o, lod in lows})
         game = s.preset == "UNREAL"
@@ -338,10 +344,11 @@ def run(context, p, s):
     scene = context.scene
     vl = context.view_layer
     dg = context.evaluated_depsgraph_get()
-    old_sel = [o for o in vl.objects if o.select_get()]
+    all_objs = list(vl.objects)  # taken now: the view layer's own list goes stale while copies come and go
+    old_sel = {o for o in all_objs if o.select_get()}
     old_active = vl.objects.active
-    old_mode = context.mode
-    if old_mode != "OBJECT" and context.active_object is not None:
+    old_mode = old_active.mode if old_active is not None else "OBJECT"  # EDIT, SCULPT, WEIGHT_PAINT...
+    if context.mode != "OBJECT" and context.active_object is not None:
         bpy.ops.object.mode_set(mode="OBJECT")
     tmp_col = bpy.data.collections.new(TMP_COLLECTION)
     scene.collection.children.link(tmp_col)
@@ -356,11 +363,18 @@ def run(context, p, s):
             if me and me.users == 0:
                 bpy.data.meshes.remove(me)
         bpy.data.collections.remove(tmp_col)
-        for o in vl.objects:
-            o.select_set(o in old_sel)
+        vl.update()
+        for o in all_objs:
+            try:
+                o.select_set(o in old_sel)
+            except (ReferenceError, RuntimeError):
+                pass  # removed or no longer in the view layer
         vl.objects.active = old_active
-        if old_mode == "EDIT_MESH" and old_active is not None:
-            bpy.ops.object.mode_set(mode="EDIT")
+        if old_mode != "OBJECT" and old_active is not None:
+            try:
+                bpy.ops.object.mode_set(mode=old_mode)
+            except (RuntimeError, TypeError):
+                pass  # the mode can't be re-entered; stay in Object Mode
     return results
 
 
@@ -388,13 +402,20 @@ def _write(context, dg, tmp_col, job, f, s):
             tmp_col.objects.link(ob)
             temps.append(ob)
         vl = context.view_layer
+        vl.update()  # the copies just linked must be known to the view layer
         for o in vl.objects:
-            o.select_set(False)
+            if o is not None:
+                o.select_set(False)
         for ob in temps:
             ob.select_set(True)
         vl.objects.active = temps[0] if temps else None
         bad = [ob.name for ob, (name, _o) in zip(temps, wanted) if ob.name != name]
-        r = bpy.ops.export_scene.fbx(**_fbx_kwargs(s, f.path))
+        if not temps:
+            return (f.path, False, "nothing to export")
+        # Hand the exporter the copies directly. In Local View the copies aren't part of
+        # the viewport's selection, and the exporter would write an empty file.
+        with context.temp_override(selected_objects=temps, active_object=temps[0], object=temps[0]):
+            r = bpy.ops.export_scene.fbx(**_fbx_kwargs(s, f.path))
         if "FINISHED" not in r:
             return (f.path, False, "FBX exporter cancelled")
         msg = f"{len(temps)} mesh{'es' if len(temps) != 1 else ''}, {f.tris:,} tris"

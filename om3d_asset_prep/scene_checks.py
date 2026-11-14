@@ -248,13 +248,32 @@ def hard_edge_indices(me):
     return frozenset(int(i) for i in uniq[two][d < HARD_DOT])
 
 
+def _shading_mesh(obj):
+    """The mesh whose corner normals match what the viewport shades.
+    Shade Auto Smooth (4.1+) is a Smooth by Angle modifier, so its hard edges only
+    exist on the evaluated mesh. That mesh is used when its topology is unchanged
+    (edge indices still line up); otherwise the original mesh is read."""
+    me = obj.data
+    if not obj.modifiers:
+        return me
+    try:
+        ev = obj.evaluated_get(bpy.context.evaluated_depsgraph_get()).data
+    except (RuntimeError, ReferenceError, AttributeError):
+        return me
+    if ev is None or not hasattr(ev, "loops"):
+        return me
+    same = ((len(ev.vertices), len(ev.edges), len(ev.loops), len(ev.polygons))
+            == (len(me.vertices), len(me.edges), len(me.loops), len(me.polygons)))
+    return ev if same else me
+
+
 def mesh_options(obj, opt):
     """Options for one object's mesh: adds its hard edges when that check is on.
     In Edit Mode the mesh data can be stale, so the check falls back to sharp/flat flags."""
     if not opt.on("hard_no_seam") or obj.type != "MESH" or obj.mode == "EDIT":
         return opt
     try:
-        return replace(opt, hard_edges=hard_edge_indices(obj.data))
+        return replace(opt, hard_edges=hard_edge_indices(_shading_mesh(obj)))
     except Exception as exc:  # never break a check over this
         print("OM3D Asset Prep: hard edge read failed on", obj.name, exc)
         return opt

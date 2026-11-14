@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.7.1
+- Hard edges, no UV seam now sees hard edges made by Shade Auto Smooth (the Smooth by Angle modifier). Before, those meshes passed the check with 0 hard edges.
+- Overlapping UVs no longer freezes on stacked UVs. A 10,000 face mesh with every face stacked took about 19 seconds; it now takes a fraction of a second.
+- Mesh cleanup (merge, delete loose, collapsed faces, triangulate, recalculate normals) and Remove Empty Slots now skip meshes shared by several objects, and list them, as the Fix description always said. Library overrides are treated like linked data.
+- Explode and Reset: every object goes back exactly where it was, including a part parented to an object from another pair.
+- Rename to Convention and Name Pairs keep an existing prefix and asset name out of the part name: `SM_Crate_Lid` becomes `SM_Crate_Lid_low`, not `SM_Crate_SMCrateLid_low`.
+- Apply Rotation and Scale skips objects with a Multires modifier and lists them (use Object > Apply for those, which rescales the sculpt detail).
+- Remove Group Empties leaves an empty alone when some of its children are outside the scope, or when a modifier or constraint uses it (a mirror object, for example).
+- Batch Export hands its copies straight to the FBX exporter, so exporting from Local View can't write an empty file. Sculpt, Weight Paint and other modes are restored after export, and collection names are made safe to use as folder names.
+- Remove collapsed faces uses the same threshold as the Collapsed faces check.
+- Live update keeps working after a file is opened while a refresh was pending.
+- Name Pairs results no longer break on object names that contain `|`.
+
 ## 0.7.0
 - New check: Hard edges, no UV seam. Finds edges where the shading splits (sharp marks, flat faces, smooth by angle or imported custom normals) but the UVs don't, since every hard edge needs a UV seam for a clean normal map bake.
 

@@ -214,30 +214,36 @@ def _overlapping(tris, eps):
                 grid.setdefault((gx, gy), []).append(i)
 
     hit = set()
-    tested = set()
 
     def test(i, j):
-        if i == j or (i in hit and j in hit):
-            return
-        key = (i, j) if i < j else (j, i)
-        if key in tested:
-            return
-        tested.add(key)
+        """True when triangles i and j overlap (both are then marked)."""
         bi, bj = boxes[i], boxes[j]
         if (bi[2] <= bj[0] + eps or bj[2] <= bi[0] + eps or
                 bi[3] <= bj[1] + eps or bj[3] <= bi[1] + eps):
-            return
+            return False
         if _tri_overlap(tris[i], tris[j], eps):
             hit.add(i)
             hit.add(j)
+            return True
+        return False
 
+    # Only "does this triangle overlap anything" matters, so each triangle stops at its
+    # first hit. Fully stacked UVs then cost one test per triangle instead of n * n.
     for idxs in grid.values():
-        for a in range(len(idxs)):
-            for b in range(a + 1, len(idxs)):
-                test(idxs[a], idxs[b])
+        if len(idxs) < 2:
+            continue
+        for i in idxs:
+            if i in hit:
+                continue
+            for j in idxs:
+                if j != i and test(i, j):
+                    break
     for i in big:
+        if i in hit:
+            continue
         for j in range(n):
-            test(i, j)
+            if j != i and test(i, j):
+                break
     return hit
 
 
